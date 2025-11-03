@@ -1,0 +1,8 @@
+Flask
+flask-cors
+python-dotenv
+psycopg2-binary
+python-dateutil
+pandas
+numpy
+joblib
