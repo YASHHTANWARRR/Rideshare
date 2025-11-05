@@ -1,0 +1,12 @@
+# keep it small
+node_modules
+.expo
+.vscode
+dist
+web-build
+android
+ios
+*.log
+*.map
+*.tmp
+*.lock
