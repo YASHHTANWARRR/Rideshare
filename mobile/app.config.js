@@ -4,33 +4,27 @@ export default ({ config }) => ({
   name: "RideShare",
   slug: "mobile",
 
-  // --- ANDROID IDs only (no icons) ---
   android: {
     ...(config.android || {}),
     package: "com.cheesecake1005.rideshare",
     versionCode: 1,
-    // ❌ adaptiveIcon block removed (no image files required)
+    // no adaptiveIcon images
   },
 
-  // --- iOS ID only (no icons) ---
   ios: {
     ...(config.ios || {}),
     bundleIdentifier: "com.cheesecake1005.rideshare",
     supportsTablet: true
   },
 
-  // ❌ global "icon" removed
-  // ❌ web.favicon removed
+  // no global icon / favicon
   web: { ...(config.web || {}) },
 
-  // plugins: keep only what you need (no splash images)
   plugins: [
     "expo-router",
-    // Keep splash plugin but without image paths (uses default)
     ["expo-splash-screen", { backgroundColor: "#ffffff", resizeMode: "contain" }]
   ],
 
-  // keep EAS project link + backend URL
   extra: {
     ...(config.extra || {}),
     eas: {
