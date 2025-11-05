@@ -1,11 +1,18 @@
-node_modules
-.expo
-.vscode
-dist
-web-build
-android
-ios
-*.log
-*.map
-*.tmp
-*.lock
+# Ignore everything by default
+/*
+
+# Allow only the mobile app
+!mobile/**
+!mobile/.easignore
+
+# Still ignore junk inside mobile
+mobile/node_modules
+mobile/.expo
+mobile/android
+mobile/ios
+mobile/dist
+mobile/web-build
+mobile/*.log
+mobile/*.map
+mobile/*.tmp
+mobile/*.lock
