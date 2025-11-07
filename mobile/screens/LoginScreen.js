@@ -41,6 +41,8 @@ export default function LoginScreen({ navigation }) {
   const isThapar = (e) => /@(?:thapar\.edu)$/i.test((e || "").trim());
 
   async function handleLogin() {
+    console.log("BACKEND_BASE =", BACKEND_BASE); // 👈 see which URL we are hitting
+
     const e = email.trim();
     const p = password.trim();
     if (!isThapar(e)) return Alert.alert("Invalid Email", "Use your Thapar email (e.g., rollno@thapar.edu)");
@@ -48,13 +50,24 @@ export default function LoginScreen({ navigation }) {
 
     try {
       setLoading(true);
-      const { resp, data } = await safeFetch(`${BACKEND_BASE.replace(/\/+$/, "")}/login`, {
+
+      const url = `${BACKEND_BASE.replace(/\/+$/, "")}/login`;
+      console.log("LOGIN → POST", url);
+
+      const { resp, data } = await safeFetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: e, password: p }),
       });
+
+      console.log("LOGIN RESPONSE:", resp?.status, data);
       setLoading(false);
-      if (!resp || !resp.ok || !data?.ok) throw new Error(data?.error || "Login failed");
+
+      if (!resp || !resp.ok || !data?.ok) {
+        const msg = data?.error || `HTTP ${resp?.status || "?"} on /login`;
+        console.log("LOGIN FAIL:", { status: resp?.status, data });
+        throw new Error(msg);
+      }
 
       await AsyncStorage.setItem("user", JSON.stringify(data.user));
       if (data.accessToken) await AsyncStorage.setItem("accessToken", data.accessToken);
@@ -63,11 +76,14 @@ export default function LoginScreen({ navigation }) {
       navigation.replace("Main", { user: data.user });
     } catch (err) {
       setLoading(false);
+      console.error("LOGIN ERROR →", err?.message || err);
       Alert.alert("Login Error", err.message || "Unexpected error");
     }
   }
 
   async function handleRegister() {
+    console.log("BACKEND_BASE =", BACKEND_BASE); // 👈 see which URL we are hitting
+
     const e = email.trim();
     const p = password.trim();
     const n = name.trim();
@@ -75,31 +91,45 @@ export default function LoginScreen({ navigation }) {
     const y = year.trim();
     const r = rollNo.trim();
 
-    if (!isThapar(e)) return Alert.alert("Invalid Email", "Use your Thapar email (e.g., asingh19_be23@thapar.edu)");
+    if (!isThapar(e)) return Alert.alert("Invalid Email", "Use your Thapar email (e.g., rollno@thapar.edu)");
     if (!p || !n || !g || !y || !r) return Alert.alert("Missing Fields", "Please fill in all details.");
 
     try {
       setLoading(true);
+
       const body = {
         email: e,
         password: p,
         name: n,
         gender: g,
         year: parseInt(y, 10),
-        rollNo: r, // <-- FIXED (was roll_no)
+        rollNo: r, // backend expects rollNo (server maps to roll_no)
       };
-      const { resp, data } = await safeFetch(`${BACKEND_BASE.replace(/\/+$/, "")}/register`, {
+
+      const url = `${BACKEND_BASE.replace(/\/+$/, "")}/register`;
+      console.log("REGISTER → POST", url, body);
+
+      const { resp, data } = await safeFetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+
+      console.log("REGISTER RESPONSE:", resp?.status, data);
       setLoading(false);
-      if (!resp || !resp.ok || !data?.ok) throw new Error(data?.error || "Registration failed");
+
+      if (!resp || !resp.ok || !data?.ok) {
+        const msg = data?.error || `HTTP ${resp?.status || "?"} on /register`;
+        console.log("REGISTER FAIL:", { status: resp?.status, data });
+        throw new Error(msg);
+      }
+
       Alert.alert("Success", `Registered successfully! Please login.`);
       setMode("login");
       setPassword("");
     } catch (err) {
       setLoading(false);
+      console.error("REGISTER ERROR →", err?.message || err);
       Alert.alert("Registration Error", err.message || "Unexpected error");
     }
   }
