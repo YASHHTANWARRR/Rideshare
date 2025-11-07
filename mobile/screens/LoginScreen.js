@@ -1,3 +1,4 @@
+// screens/LoginScreen.js  — FIXED: rollNo key + password length check
 import React, { useState } from "react";
 import {
   View,
@@ -65,7 +66,6 @@ export default function LoginScreen({ navigation }) {
       if (data.accessToken) await AsyncStorage.setItem("accessToken", data.accessToken);
       if (data.refreshToken) await AsyncStorage.setItem("refreshToken", data.refreshToken);
 
-      // 🚫 Don't push user object into URL; read from storage in other screens
       navigation.replace("Main");
     } catch (err) {
       setLoading(false);
@@ -83,6 +83,7 @@ export default function LoginScreen({ navigation }) {
 
     if (!isThapar(e)) return Alert.alert("Invalid Email", "Use your Thapar email (e.g., rollno@thapar.edu)");
     if (!p || !n || !g || !y || !r) return Alert.alert("Missing Fields", "Please fill in all details.");
+    if (p.length < 8) return Alert.alert("Weak Password", "Password must be at least 8 characters."); // backend policy
 
     try {
       setLoading(true);
@@ -92,8 +93,7 @@ export default function LoginScreen({ navigation }) {
         name: n,
         gender: g,
         year: parseInt(y, 10),
-        // ⬇️ use the snake_case key if your server expects roll_no
-        roll_no: r,
+        rollNo: r, // ✅ camelCase to match server.js
       };
 
       const url = `${BACKEND_BASE.replace(/\/+$/, "")}/register`;
@@ -208,7 +208,7 @@ export default function LoginScreen({ navigation }) {
             <View style={styles.inputRow}>
               <Ionicons name="lock-closed-outline" size={20} color="#555" />
               <TextInput
-                placeholder="Create password"
+                placeholder="Create password (min 8 chars)"
                 value={password}
                 onChangeText={setPassword}
                 style={styles.input}
