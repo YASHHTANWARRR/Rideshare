@@ -4,6 +4,7 @@ import MapBackdrop from "../components/MapBackdrop";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { BACKEND_BASE } from "../App";
+import { CommonActions } from "@react-navigation/native"; // ✅ add this
 
 export default function ProfileScreen({ route, navigation }) {
   const routeUser = route.params?.user || {};
@@ -26,6 +27,7 @@ export default function ProfileScreen({ route, navigation }) {
       const token = await AsyncStorage.getItem("accessToken");
       const refreshToken = await AsyncStorage.getItem("refreshToken");
 
+      // try server logout (don't block UI if it fails)
       try {
         await fetch(`${BACKEND_BASE.replace(/\/+$/, "")}/logout`, {
           method: "POST",
@@ -39,10 +41,17 @@ export default function ProfileScreen({ route, navigation }) {
         console.warn("logout request failed", e);
       }
     } finally {
-      await AsyncStorage.removeItem("user");
-      await AsyncStorage.removeItem("accessToken");
-      await AsyncStorage.removeItem("refreshToken");
-      navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+      // clear all auth locally
+      await AsyncStorage.multiRemove(["user", "accessToken", "refreshToken"]);
+
+      // ✅ reset the ROOT stack (not the Tab navigator)
+      const rootNav = navigation.getParent?.() || navigation;
+      rootNav.dispatch(
+        CommonActions.reset({
+          index: 0,
+          routes: [{ name: "Login" }],
+        })
+      );
     }
   }
 
@@ -59,12 +68,15 @@ export default function ProfileScreen({ route, navigation }) {
             <Ionicons name="arrow-back" size={22} color="#333" />
           </TouchableOpacity>
           <Text style={styles.title}>Profile</Text>
-          <TouchableOpacity onPress={() => {
-            Alert.alert("Logout", "Are you sure you want to logout?", [
-              { text: "Cancel", style: "cancel" },
-              { text: "Logout", style: "destructive", onPress: handleLogout }
-            ]);
-          }} style={{ padding: 6 }}>
+          <TouchableOpacity
+            onPress={() => {
+              Alert.alert("Logout", "Are you sure you want to logout?", [
+                { text: "Cancel", style: "cancel" },
+                { text: "Logout", style: "destructive", onPress: handleLogout },
+              ]);
+            }}
+            style={{ padding: 6 }}
+          >
             <Ionicons name="log-out-outline" size={22} color="#E53935" />
           </TouchableOpacity>
         </View>
