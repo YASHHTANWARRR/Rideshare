@@ -1,4 +1,3 @@
-// server.js — production-ready (ESM)
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -501,9 +500,9 @@ app.get("/group/:gid", generalLimiter, async (req, res) => {
 });
 
 // search-groups
-app.post("/search-groups", generalLimiter, async (req, res) => {
-  try {
-    const { start, dest, preference, max_size, viewer_uid } = req.body || {};
+app.post("/search-groups", generalLimiter, requireAuth,  async (req, res) => { try {
+    const { start, dest, preference, max_size,  } = req.body || {};
+    const viewer_uid = (req.user && req.user.uid) || null;
     const TIME_WINDOW_MINS = 60;
 
     const rawDeparture = req.body && req.body.departure ? String(req.body.departure).trim() : null;
