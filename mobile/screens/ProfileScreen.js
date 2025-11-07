@@ -1,22 +1,24 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from "react-native";
-import MapBackdrop from "../components/MapBackdrop";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
+import { CommonActions } from "@react-navigation/native";
 import { BACKEND_BASE } from "../App";
-import { CommonActions } from "@react-navigation/native"; // ✅ add this
+import MapBackdrop from "../components/MapBackdrop";
 
 export default function ProfileScreen({ route, navigation }) {
-  const routeUser = route.params?.user || {};
-  const [user, setUser] = useState(routeUser);
+  const initialUser = route?.params?.user || null;
+  const [user, setUser] = useState(initialUser);
 
-  React.useEffect(() => {
+  useEffect(() => {
     async function loadUser() {
-      if (!user) {
+      if (!initialUser) {
         try {
           const raw = await AsyncStorage.getItem("user");
           if (raw) setUser(JSON.parse(raw));
-        } catch (e) {}
+        } catch (e) {
+          console.log("Failed to load user from storage:", e?.message || e);
+        }
       }
     }
     loadUser();
@@ -24,29 +26,29 @@ export default function ProfileScreen({ route, navigation }) {
 
   async function handleLogout() {
     try {
-      const token = await AsyncStorage.getItem("accessToken");
+      const accessToken = await AsyncStorage.getItem("accessToken");
       const refreshToken = await AsyncStorage.getItem("refreshToken");
 
-      // try server logout (don't block UI if it fails)
+      // Try server logout (non-blocking)
       try {
         await fetch(`${BACKEND_BASE.replace(/\/+$/, "")}/logout`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: token ? `Bearer ${token}` : undefined,
+            Authorization: accessToken ? `Bearer ${accessToken}` : undefined,
           },
           body: JSON.stringify({ refreshToken }),
         });
       } catch (e) {
-        console.warn("logout request failed", e);
+        console.log("Server logout failed (continuing):", e?.message || e);
       }
-    } finally {
-      // clear all auth locally
-      await AsyncStorage.multiRemove(["user", "accessToken", "refreshToken"]);
 
-      // ✅ reset the ROOT stack (not the Tab navigator)
-      const rootNav = navigation.getParent?.() || navigation;
-      rootNav.dispatch(
+      // ✅ Clear local auth first to prevent auto-login on next app start
+      await AsyncStorage.multiRemove(["user", "accessToken", "refreshToken"]);
+      console.log("Auth storage cleared.");
+    } finally {
+      // ✅ Hard reset to Login screen
+      navigation.dispatch(
         CommonActions.reset({
           index: 0,
           routes: [{ name: "Login" }],
@@ -61,20 +63,22 @@ export default function ProfileScreen({ route, navigation }) {
 
   return (
     <View style={{ flex: 1 }}>
-      <MapBackdrop blur={true} />
+      <MapBackdrop blur />
       <View style={styles.card}>
-        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+        <View style={styles.headerRow}>
           <TouchableOpacity onPress={handleBack} style={{ padding: 6 }}>
             <Ionicons name="arrow-back" size={22} color="#333" />
           </TouchableOpacity>
+
           <Text style={styles.title}>Profile</Text>
+
           <TouchableOpacity
-            onPress={() => {
+            onPress={() =>
               Alert.alert("Logout", "Are you sure you want to logout?", [
                 { text: "Cancel", style: "cancel" },
                 { text: "Logout", style: "destructive", onPress: handleLogout },
-              ]);
-            }}
+              ])
+            }
             style={{ padding: 6 }}
           >
             <Ionicons name="log-out-outline" size={22} color="#E53935" />
@@ -85,6 +89,12 @@ export default function ProfileScreen({ route, navigation }) {
         <Text style={styles.item}>Email: {user?.email ?? "-"}</Text>
         <Text style={styles.item}>UID: {user?.uid ?? "-"}</Text>
         <Text style={styles.item}>Gender: {user?.gender ?? "-"}</Text>
+        {user?.roll_no || user?.rollNo ? (
+          <Text style={styles.item}>Roll No: {user.roll_no || user.rollNo}</Text>
+        ) : null}
+        {typeof user?.year !== "undefined" ? (
+          <Text style={styles.item}>Year: {String(user.year)}</Text>
+        ) : null}
       </View>
     </View>
   );
@@ -103,6 +113,12 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 6,
   },
-  title: { fontSize: 20, fontWeight: "700", marginBottom: 10, color: "#E53935" },
-  item: { fontSize: 14, color: "#444", marginBottom: 6 },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  title: { fontSize: 20, fontWeight: "700", color: "#E53935" },
+  item: { fontSize: 14, color: "#444", marginTop: 8 },
 });
