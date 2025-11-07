@@ -56,7 +56,7 @@ function detectBackendBase() {
   }
 
   // 5) production fallback — replace with your real prod backend
-  return "https://your-production-backend.example.com";
+    return "https://ucs503p-202526odd-teamkhabu.onrender.com";
 }
 
 export const BACKEND_BASE = MANUAL_BACKEND_BASE || detectBackendBase();

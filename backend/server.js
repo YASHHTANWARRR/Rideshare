@@ -11,7 +11,14 @@ dotenv.config();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
+// Behind Render/NGINX to get real IP for rate-limit etc.
+app.set("trust proxy", 1);
 
 // ---------- Config & sanity ----------
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -20,28 +27,36 @@ const ACCESS_TOKEN_EXPIRES = process.env.ACCESS_TOKEN_EXPIRES || "15m";
 const REFRESH_TOKEN_EXPIRES = process.env.REFRESH_TOKEN_EXPIRES || "30d";
 const BCRYPT_SALT_ROUNDS = process.env.BCRYPT_SALT_ROUNDS ? parseInt(process.env.BCRYPT_SALT_ROUNDS, 10) : 10;
 const PASSWORD_MIN_LEN = process.env.PASSWORD_MIN_LEN ? parseInt(process.env.PASSWORD_MIN_LEN, 10) : 8;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || null;
 
-if (!process.env.PGPASSWORD && !process.env.DATABASE_URL) {
-  console.warn("WARNING: No PGPASSWORD or DATABASE_URL found in environment. Don't use default credentials in production.");
-}
-if (!process.env.JWT_SECRET) {
-  console.warn("WARNING: JWT_SECRET not set. Set it in production.");
-}
+// ---------- CORS (dev + vercel + allow-list via env) ----------
+const allowList = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-// ---------- CORS ----------
-if (CORS_ORIGIN) {
-  // allow comma-separated origins
-  const allowed = CORS_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
-  app.use(cors({ origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // allow non-browser calls (curl, mobile)
-    if (allowed.includes(origin)) return cb(null, true);
-    cb(new Error("CORS policy: origin not allowed"));
-  }, credentials: true }));
-} else {
-  console.warn("CORS_ORIGIN not set; using permissive CORS for now. Set CORS_ORIGIN to your frontend URL in production.");
-  app.use(cors({ origin: "*", credentials: true }));
-}
+const allowRegexes = [
+  /^https?:\/\/localhost(?::\d+)?$/i,
+  /^https?:\/\/127\.0\.0\.1(?::\d+)?$/i,
+  /^https?:\/\/192\.168\.\d+\.\d+(?::\d+)?$/i,
+  /https?:\/\/.*\.vercel\.app$/i, // vercel previews + prod
+];
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // Postman/mobile/native apps send no Origin
+      if (!origin) return cb(null, true);
+      if (allowList.includes(origin)) return cb(null, true);
+      if (allowRegexes.some((rx) => rx.test(origin))) return cb(null, true);
+      return cb(new Error("CORS policy: origin not allowed"));
+    },
+    credentials: false,
+    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  })
+);
+// Preflight helper
+app.options("*", cors());
 
 // ---------- Postgres pool (SSL-safe) ----------
 const connectionString = process.env.DATABASE_URL || undefined;
@@ -226,6 +241,9 @@ function requireAuth(req, res, next) {
 }
 
 // ---------- Routes ----------
+// Health for quick browser test
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
 app.get("/", (_req, res) => res.json({ ok: true, msg: "rideshare server running" }));
 
 // register
@@ -265,11 +283,7 @@ app.post("/register", authLimiter, async (req, res) => {
       expiresAt,
     ]);
 
-    return ok(res, {
-      user,
-      accessToken,
-      refreshToken,
-    });
+    return ok(res, { user, accessToken, refreshToken });
   } catch (err) {
     if (err && err.code === "23505") return respondError(res, 400, "roll_no or email already exists");
     console.error("register error:", err);
@@ -454,10 +468,9 @@ app.post("/join-group", generalLimiter, requireAuth, async (req, res) => {
         await client.query("ROLLBACK");
         return respondError(res, 404, "group not found");
       }
-      const capacity = gq.rows[0].capacity;
-
       const membersRes = await client.query(`SELECT COUNT(*)::int AS cnt FROM group_members WHERE gid = $1`, [gidInt]);
       const current = parseInt(membersRes.rows[0].cnt || 0, 10);
+      const capacity = gq.rows[0].capacity;
       if (current >= capacity) {
         await client.query("ROLLBACK");
         return respondError(res, 400, "group is full");
@@ -499,9 +512,10 @@ app.get("/group/:gid", generalLimiter, async (req, res) => {
   }
 });
 
-// search-groups
-app.post("/search-groups", generalLimiter, requireAuth,  async (req, res) => { try {
-    const { start, dest, preference, max_size,  } = req.body || {};
+// search-groups (auth required for mutuals)
+app.post("/search-groups", generalLimiter, requireAuth, async (req, res) => {
+  try {
+    const { start, dest, preference, max_size } = req.body || {};
     const viewer_uid = (req.user && req.user.uid) || null;
     const TIME_WINDOW_MINS = 60;
 
@@ -618,9 +632,7 @@ app.post("/search-groups", generalLimiter, requireAuth,  async (req, res) => { t
         if (!okMatch) continue;
 
         if (desiredDeparture) {
-          if (!g.departure_date) {
-            continue;
-          }
+          if (!g.departure_date) continue;
           const groupDep = new Date(g.departure_date);
           const diffMs = Math.abs(groupDep.getTime() - desiredDeparture.getTime());
           if (diffMs > windowMs) continue;
