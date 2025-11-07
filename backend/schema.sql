@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS connections (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
+-- refresh_tokens: server also creates it, but keeping here is fine (IF NOT EXISTS)
 CREATE TABLE IF NOT EXISTS refresh_tokens (
   token TEXT PRIMARY KEY,
   uid INT NOT NULL,
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 );
 
 -- helper function: user_connection_degree
+-- NOTE: mark STABLE (not IMMUTABLE) because it reads tables.
 CREATE OR REPLACE FUNCTION user_connection_degree(a INT, b INT) RETURNS INT AS $$
   WITH RECURSIVE conn(path, last) AS (
     SELECT ARRAY[a], a
@@ -60,4 +62,4 @@ CREATE OR REPLACE FUNCTION user_connection_degree(a INT, b INT) RETURNS INT AS $
     WHERE NOT u2.uid = ANY(path)
   )
   SELECT array_length(path,1)-1 FROM conn WHERE last = b LIMIT 1;
-$$ LANGUAGE SQL IMMUTABLE;
+$$ LANGUAGE SQL STABLE;
