@@ -86,7 +86,7 @@ export default function LoginScreen({ navigation }) {
         name: n,
         gender: g,
         year: parseInt(y, 10),
-        roll_no: r,
+        rollNo: r, // <-- FIXED (was roll_no)
       };
       const { resp, data } = await safeFetch(`${BACKEND_BASE.replace(/\/+$/, "")}/register`, {
         method: "POST",

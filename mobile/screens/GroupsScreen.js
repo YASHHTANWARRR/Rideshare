@@ -1,4 +1,3 @@
-// GroupsScreen.js (modal picker version) — logout removed from header
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   View,
@@ -74,17 +73,24 @@ export default function GroupsScreen({ route, navigation }) {
     }
 
     setLoading(true);
-    try {
+    
+const token = await AsyncStorage.getItem("accessToken");
+if (!token) {
+  setLoading(false);
+  Alert.alert("Login required", "Please login to search and see mutual connections.");
+  navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+  return;
+}
+try {
       const token = await AsyncStorage.getItem("accessToken");
-      const headers = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${token}` };
 
       const payload = {
         start: start.trim(),
         dest: dest.trim(),
         preference: preference || "ALL",
         max_size: parseInt(groupSize || "1", 10),
-        time: date ? date.toISOString() : null,
+        departure: date ? date.toISOString() : null, // <-- FIXED (was time)
       };
 
       const { resp, data } = await safeFetch(`${BACKEND_BASE.replace(/\/+$/, "")}/search-groups`, {
@@ -213,7 +219,7 @@ export default function GroupsScreen({ route, navigation }) {
           />
         </View>
 
-        <View style={styles.prefRow}>
+        <View className="pref-row" style={styles.prefRow}>
           <TouchableOpacity style={[styles.prefBtn, preference === "ALL" && styles.prefBtnActive]} onPress={() => setPreference("ALL")}>
             <Text style={preference === "ALL" ? styles.prefTextActive : styles.prefText}>All</Text>
           </TouchableOpacity>
