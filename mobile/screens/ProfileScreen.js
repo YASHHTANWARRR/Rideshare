@@ -1,5 +1,6 @@
+// screens/ProfileScreen.js
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Alert, Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { CommonActions } from "@react-navigation/native";
@@ -11,17 +12,16 @@ export default function ProfileScreen({ route, navigation }) {
   const [user, setUser] = useState(initialUser);
 
   useEffect(() => {
-    async function loadUser() {
+    (async () => {
       if (!initialUser) {
         try {
           const raw = await AsyncStorage.getItem("user");
           if (raw) setUser(JSON.parse(raw));
         } catch (e) {
-          console.log("Failed to load user from storage:", e?.message || e);
+          console.log("Failed to load user:", e?.message || e);
         }
       }
-    }
-    loadUser();
+    })();
   }, []);
 
   async function handleLogout() {
@@ -29,7 +29,7 @@ export default function ProfileScreen({ route, navigation }) {
       const accessToken = await AsyncStorage.getItem("accessToken");
       const refreshToken = await AsyncStorage.getItem("refreshToken");
 
-      // Try server logout (non-blocking)
+      // best-effort server logout
       try {
         await fetch(`${BACKEND_BASE.replace(/\/+$/, "")}/logout`, {
           method: "POST",
@@ -43,22 +43,45 @@ export default function ProfileScreen({ route, navigation }) {
         console.log("Server logout failed (continuing):", e?.message || e);
       }
 
-      // ✅ Clear local auth first to prevent auto-login on next app start
+      // clear local auth first (prevents auto-login)
       await AsyncStorage.multiRemove(["user", "accessToken", "refreshToken"]);
-      console.log("Auth storage cleared.");
     } finally {
-      // ✅ Hard reset to Login screen
+      // reset to Login screen
       navigation.dispatch(
         CommonActions.reset({
           index: 0,
           routes: [{ name: "Login" }],
         })
       );
+
+      // also clean the URL on web so refresh doesn't deep-link to /Main/...
+      if (typeof window !== "undefined" && window.history && window.location) {
+        try {
+          window.history.replaceState(null, "", "/");
+        } catch {}
+      }
     }
   }
 
-  function handleBack() {
-    navigation.goBack();
+  function confirmLogout() {
+    if (Platform.OS === "web") {
+      // web-safe confirm path
+      if (typeof window !== "undefined" && window.confirm) {
+        if (window.confirm("Are you sure you want to logout?")) {
+          handleLogout();
+        }
+      } else {
+        // fallback: just logout
+        handleLogout();
+      }
+      return;
+    }
+
+    // native path (iOS/Android)
+    Alert.alert("Logout", "Are you sure you want to logout?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Logout", style: "destructive", onPress: handleLogout },
+    ]);
   }
 
   return (
@@ -66,21 +89,13 @@ export default function ProfileScreen({ route, navigation }) {
       <MapBackdrop blur />
       <View style={styles.card}>
         <View style={styles.headerRow}>
-          <TouchableOpacity onPress={handleBack} style={{ padding: 6 }}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={{ padding: 6 }}>
             <Ionicons name="arrow-back" size={22} color="#333" />
           </TouchableOpacity>
 
           <Text style={styles.title}>Profile</Text>
 
-          <TouchableOpacity
-            onPress={() =>
-              Alert.alert("Logout", "Are you sure you want to logout?", [
-                { text: "Cancel", style: "cancel" },
-                { text: "Logout", style: "destructive", onPress: handleLogout },
-              ])
-            }
-            style={{ padding: 6 }}
-          >
+          <TouchableOpacity onPress={confirmLogout} style={{ padding: 6 }}>
             <Ionicons name="log-out-outline" size={22} color="#E53935" />
           </TouchableOpacity>
         </View>
