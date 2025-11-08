@@ -9,6 +9,7 @@ import {
   StyleSheet,
   Alert,
   Platform,
+  Switch,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePickerModal from "react-native-modal-datetime-picker";
@@ -20,11 +21,7 @@ async function safeFetch(url, opts = {}) {
   try {
     const resp = await fetch(url, opts);
     let data = null;
-    try {
-      data = await resp.json();
-    } catch (e) {
-      data = { ok: resp.ok, error: "Invalid JSON from server" };
-    }
+    try { data = await resp.json(); } catch { data = { ok: resp.ok, error: "Invalid JSON from server" }; }
     return { resp, data };
   } catch (e) {
     return { resp: null, data: { ok: false, error: e.message || "Network error" } };
@@ -44,24 +41,22 @@ export default function GroupsScreen({ route, navigation }) {
   const [date, setDate] = useState(new Date());
   const [showPicker, setShowPicker] = useState(false);
 
+  // NEW: whole-day toggle & window mins
+  const [wholeDay, setWholeDay] = useState(true);
+  const [windowMins, setWindowMins] = useState("60");
+
   const isMounted = useRef(true);
-  useEffect(() => {
-    isMounted.current = true;
-    return () => {
-      isMounted.current = false;
-    };
-  }, []);
+  useEffect(() => () => { isMounted.current = false; }, []);
 
   useEffect(() => {
-    async function loadUser() {
+    (async () => {
       if (!user) {
         try {
           const raw = await AsyncStorage.getItem("user");
           if (raw && isMounted.current) setUser(JSON.parse(raw));
-        } catch (e) {}
+        } catch {}
       }
-    }
-    loadUser();
+    })();
   }, []);
 
   const canSearch = start.trim() !== "" && dest.trim() !== "";
@@ -71,49 +66,47 @@ export default function GroupsScreen({ route, navigation }) {
       Alert.alert("Enter route", "Please fill both From and To before searching.");
       return;
     }
-
     setLoading(true);
-    
-const token = await AsyncStorage.getItem("accessToken");
-if (!token) {
-  setLoading(false);
-  Alert.alert("Login required", "Please login to search and see mutual connections.");
-  navigation.reset({ index: 0, routes: [{ name: "Login" }] });
-  return;
-}
-try {
-      const token = await AsyncStorage.getItem("accessToken");
-      const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${token}` };
+
+    const token = await AsyncStorage.getItem("accessToken");
+    if (!token) {
+      setLoading(false);
+      Alert.alert("Login required", "Please login to search and see mutual connections.");
+      navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+      return;
+    }
+
+    try {
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
       const payload = {
         start: start.trim(),
         dest: dest.trim(),
         preference: preference || "ALL",
         max_size: parseInt(groupSize || "1", 10),
-        departure: date ? date.toISOString() : null, // <-- FIXED (was time)
+        departure: date ? date.toISOString() : null,
+        scope: wholeDay ? "day" : "",
+        time_window_mins: wholeDay ? null : (parseInt(windowMins || "60", 10) || 60),
       };
 
-      const { resp, data } = await safeFetch(`${BACKEND_BASE.replace(/\/+$/, "")}/search-groups`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      });
+      const { resp, data } = await safeFetch(
+        `${BACKEND_BASE.replace(/\/+$/, "")}/search-groups`,
+        { method: "POST", headers, body: JSON.stringify(payload) }
+      );
 
       if (!resp || !resp.ok || !data?.ok) {
         setGroups([]);
         if (data?.error) {
-          if (data.error.toLowerCase().includes("token")) {
+          if (String(data.error).toLowerCase().includes("token")) {
             Alert.alert("Session expired", "Please login again.");
-            await AsyncStorage.removeItem("user");
-            await AsyncStorage.removeItem("accessToken");
-            await AsyncStorage.removeItem("refreshToken");
+            await AsyncStorage.multiRemove(["user", "accessToken", "refreshToken"]);
             navigation.reset({ index: 0, routes: [{ name: "Login" }] });
             return;
           }
           Alert.alert("Search error", data.error);
         }
       } else {
-        setGroups(data.matches || []);
+        setGroups(Array.isArray(data.groups) ? data.groups : []);
       }
     } catch (err) {
       console.error("search-groups error:", err);
@@ -122,40 +115,26 @@ try {
     } finally {
       setLoading(false);
     }
-  }, [start, dest, preference, groupSize, date, canSearch, navigation]);
+  }, [start, dest, preference, groupSize, date, wholeDay, windowMins, canSearch, navigation]);
 
-  function handleBack() {
-    navigation.goBack();
-  }
+  function handleBack() { navigation.goBack(); }
 
   function openDatePicker() {
     if (Platform.OS === "web") {
       const input = window.prompt("Enter date & time (YYYY-MM-DD HH:MM)", "");
       if (!input) return;
       const parsed = new Date(input.replace(" ", "T") + ":00");
-      if (!isNaN(parsed.getTime())) setDate(parsed);
-      else Alert.alert("Invalid date");
+      if (!isNaN(parsed.getTime())) setDate(parsed); else Alert.alert("Invalid date");
       return;
     }
     if (isMounted.current) setShowPicker(true);
   }
-
   function onPickerConfirm(selectedDate) {
-    try {
-      if (!isMounted.current) return;
-      setShowPicker(false);
+    try { if (!isMounted.current) return; setShowPicker(false);
       if (selectedDate instanceof Date && !isNaN(selectedDate.getTime())) setDate(selectedDate);
-    } catch (e) {
-      console.warn("picker confirm error", e);
-      try { setShowPicker(false); } catch {}
-    }
+    } catch { try { setShowPicker(false); } catch {} }
   }
-
-  function onPickerCancel() {
-    try {
-      if (isMounted.current) setShowPicker(false);
-    } catch (e) {}
-  }
+  function onPickerCancel() { try { if (isMounted.current) setShowPicker(false); } catch {} }
 
   const renderItem = ({ item }) => {
     const routeText = (item.route || []).join(" → ");
@@ -164,23 +143,13 @@ try {
         <Text style={styles.cardTitle}>{routeText}</Text>
         <View style={styles.row}>
           <Text style={styles.small}>Seats left: {item.seats_left}</Text>
-          <View
-            style={[
-              styles.chip,
-              {
-                backgroundColor: item.preference === "FEMALE_ONLY" ? "#f8bbd0" : "#b3e5fc",
-              },
-            ]}
-          >
+          <View style={[styles.chip, { backgroundColor: item.preference === "FEMALE_ONLY" ? "#f8bbd0" : "#b3e5fc" }]}>
             <Text style={styles.chipText}>{item.preference}</Text>
           </View>
         </View>
         {item.mutual_friends?.length > 0 && (
           <Text style={{ marginTop: 6, color: "#666" }}>
-            Mutuals:{" "}
-            {item.mutual_friends
-              .map((m) => `${m.name} (deg ${m.degree})`)
-              .join(", ")}
+            Mutuals: {item.mutual_friends.map((m) => `${m.name} (deg ${m.degree})`).join(", ")}
           </Text>
         )}
       </TouchableOpacity>
@@ -207,7 +176,6 @@ try {
           <Ionicons name="flag" color="#E53935" size={18} />
           <TextInput placeholder="To" style={styles.input} value={dest} onChangeText={setDest} />
         </View>
-
         <View style={styles.inputRow}>
           <Ionicons name="people" color="#E53935" size={18} />
           <TextInput
@@ -219,14 +187,11 @@ try {
           />
         </View>
 
-        <View className="pref-row" style={styles.prefRow}>
+        <View style={styles.prefRow}>
           <TouchableOpacity style={[styles.prefBtn, preference === "ALL" && styles.prefBtnActive]} onPress={() => setPreference("ALL")}>
             <Text style={preference === "ALL" ? styles.prefTextActive : styles.prefText}>All</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.prefBtn, preference === "FEMALE_ONLY" && styles.prefBtnActive]}
-            onPress={() => setPreference("FEMALE_ONLY")}
-          >
+          <TouchableOpacity style={[styles.prefBtn, preference === "FEMALE_ONLY" && styles.prefBtnActive]} onPress={() => setPreference("FEMALE_ONLY")}>
             <Text style={preference === "FEMALE_ONLY" ? styles.prefTextActive : styles.prefText}>Female Only</Text>
           </TouchableOpacity>
         </View>
@@ -238,13 +203,27 @@ try {
           </Text>
         </TouchableOpacity>
 
-        <DateTimePickerModal
-          isVisible={showPicker}
-          mode="datetime"
-          date={date}
-          onConfirm={onPickerConfirm}
-          onCancel={onPickerCancel}
-        />
+        {/* Whole-day vs Exact window controls */}
+        <View style={styles.rowBetween}>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Switch value={wholeDay} onValueChange={setWholeDay} />
+            <Text style={{ marginLeft: 8 }}>Whole day search</Text>
+          </View>
+          {!wholeDay && (
+            <View style={[styles.inputRow, { width: 150, marginBottom: 0 }]}>
+              <Ionicons name="time" color="#E53935" size={18} />
+              <TextInput
+                placeholder="Window (mins)"
+                style={styles.input}
+                keyboardType="number-pad"
+                value={windowMins}
+                onChangeText={setWindowMins}
+              />
+            </View>
+          )}
+        </View>
+
+        <DateTimePickerModal isVisible={showPicker} mode="datetime" date={date} onConfirm={onPickerConfirm} onCancel={onPickerCancel} />
 
         <TouchableOpacity style={[styles.searchBtn, !canSearch && { opacity: 0.6 }]} onPress={loadRecommendations} disabled={!canSearch}>
           <Ionicons name="search" color="#fff" size={20} />
@@ -256,7 +235,7 @@ try {
         {loading ? (
           <ActivityIndicator size="large" color="#E53935" style={{ marginTop: 16 }} />
         ) : (
-          <FlatList data={groups} keyExtractor={(item) => (item.gid ? String(item.gid) : JSON.stringify(item))} renderItem={renderItem} style={{ marginTop: 10 }} />
+          <FlatList data={groups} keyExtractor={(item) => String(item.gid)} renderItem={renderItem} style={{ marginTop: 10 }} />
         )}
       </View>
     </View>
@@ -265,78 +244,27 @@ try {
 
 const styles = StyleSheet.create({
   sheet: { flex: 1, padding: 16 },
-  header: {
-    fontSize: 20,
-    fontWeight: "700",
-    marginBottom: 12,
-    color: "#222",
-    textAlign: "center",
-    flex: 1,
-  },
+  header: { fontSize: 20, fontWeight: "700", marginBottom: 12, color: "#222", textAlign: "center", flex: 1 },
   inputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#ddd",
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    marginBottom: 10,
-    backgroundColor: "rgba(255,255,255,0.95)",
+    flexDirection: "row", alignItems: "center",
+    borderWidth: 1, borderColor: "#ddd", borderRadius: 12,
+    paddingHorizontal: 10, marginBottom: 10, backgroundColor: "rgba(255,255,255,0.95)",
   },
   input: { flex: 1, padding: 10 },
   prefRow: { flexDirection: "row", marginTop: 4, marginBottom: 10 },
-  prefBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 18,
-    backgroundColor: "rgba(0,0,0,0.06)",
-    marginRight: 10,
-  },
+  prefBtn: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.06)", marginRight: 10 },
   prefBtnActive: { backgroundColor: "#E53935" },
   prefText: { color: "#333", fontWeight: "600" },
   prefTextActive: { color: "#fff", fontWeight: "700" },
-  dateBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#1976D2",
-    borderRadius: 12,
-    paddingVertical: 10,
-    marginBottom: 10,
-  },
+  dateBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#1976D2", borderRadius: 12, paddingVertical: 10, marginBottom: 10 },
   dateText: { color: "#fff", fontWeight: "600", marginLeft: 8 },
-  searchBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#E53935",
-    borderRadius: 12,
-    paddingVertical: 12,
-    marginTop: 6,
-  },
+  searchBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#E53935", borderRadius: 12, paddingVertical: 12, marginTop: 6 },
   searchText: { color: "#fff", fontWeight: "700", marginLeft: 6 },
-  card: {
-    backgroundColor: "rgba(255,255,255,0.95)",
-    borderRadius: 14,
-    padding: 14,
-    marginTop: 10,
-    shadowColor: "#000",
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-  },
+  card: { backgroundColor: "rgba(255,255,255,0.95)", borderRadius: 14, padding: 14, marginTop: 10, shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 6 },
   cardTitle: { fontSize: 16, fontWeight: "700", color: "#222" },
   small: { fontSize: 13, color: "#555" },
-  chip: {
-    borderRadius: 12,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    marginLeft: 10,
-  },
+  chip: { borderRadius: 12, paddingVertical: 4, paddingHorizontal: 10, marginLeft: 10 },
   chipText: { fontSize: 12, fontWeight: "600", color: "#333" },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 6,
-  },
+  row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6 },
+  rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
 });
