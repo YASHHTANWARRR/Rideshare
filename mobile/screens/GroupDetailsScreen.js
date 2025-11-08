@@ -1,5 +1,4 @@
-
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
@@ -10,11 +9,7 @@ async function safeFetch(url, opts = {}) {
   try {
     const resp = await fetch(url, opts);
     let data = null;
-    try {
-      data = await resp.json();
-    } catch (e) {
-      data = { ok: resp.ok, error: "Invalid JSON from server" };
-    }
+    try { data = await resp.json(); } catch { data = { ok: resp.ok, error: "Invalid JSON from server" }; }
     return { resp, data };
   } catch (e) {
     return { resp: null, data: { ok: false, error: e.message || "Network error" } };
@@ -28,21 +23,19 @@ export default function GroupDetailScreen({ route, navigation }) {
   const [joining, setJoining] = useState(false);
   const [user, setUser] = useState(routeUser);
 
-  React.useEffect(() => {
-    async function loadUser() {
+  useEffect(() => {
+    (async () => {
       if (!user) {
-        try {
-          const raw = await AsyncStorage.getItem("user");
-          if (raw) setUser(JSON.parse(raw));
-        } catch (e) {}
+        try { const raw = await AsyncStorage.getItem("user"); if (raw) setUser(JSON.parse(raw)); } catch {}
       }
-    }
-    loadUser();
+    })();
   }, []);
 
-  function handleBack() {
-    navigation.goBack();
-  }
+  const isOwner  = user?.uid && group?.created_by && Number(user.uid) === Number(group.created_by);
+  const isMember = !!group?.members?.some(m => Number(m.uid) === Number(user?.uid));
+  const canJoin  = !(isOwner || isMember);
+
+  function handleBack() { navigation.goBack(); }
 
   async function joinGroupHandler() {
     setJoining(true);
@@ -52,18 +45,14 @@ export default function GroupDetailScreen({ route, navigation }) {
       if (token) headers["Authorization"] = `Bearer ${token}`;
 
       const { resp, data } = await safeFetch(`${BACKEND_BASE.replace(/\/+$/, "")}/join-group`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ gid: Number(group.gid) }),
+        method: "POST", headers, body: JSON.stringify({ gid: Number(group.gid) }),
       });
 
       setJoining(false);
       if (!resp || !resp.ok || !data?.ok) {
-        if (data && data.error && data.error.toLowerCase().includes("token")) {
+        if (data?.error && String(data.error).toLowerCase().includes("token")) {
           Alert.alert("Session expired", "Please login again.");
-          await AsyncStorage.removeItem("user");
-          await AsyncStorage.removeItem("accessToken");
-          await AsyncStorage.removeItem("refreshToken");
+          await AsyncStorage.multiRemove(["user","accessToken","refreshToken"]);
           navigation.reset({ index: 0, routes: [{ name: "Login" }] });
           return;
         }
@@ -71,7 +60,12 @@ export default function GroupDetailScreen({ route, navigation }) {
       }
 
       Alert.alert("Joined", "You have successfully joined this group.");
-      if (data.group) setGroup(data.group);
+      // Optimistic update: mark as member and decrease seats_left
+      setGroup(g => ({
+        ...g,
+        seats_left: Math.max(0, (g?.seats_left ?? 1) - 1),
+        members: [...(g.members || []), { uid: user.uid, name: user.name, gender: user.gender }],
+      }));
     } catch (err) {
       setJoining(false);
       console.error("join-group error:", err);
@@ -102,40 +96,16 @@ export default function GroupDetailScreen({ route, navigation }) {
 
           <Text style={[styles.subTitle, { marginTop: 12 }]}>Members</Text>
           {group.members?.length ? (
-            group.members.map((m) => (
-              <Text key={m.uid} style={styles.item}>
-                • {m.name} — Year {m.year ?? "-"}
-              </Text>
-            ))
+            group.members.map((m) => <Text key={m.uid} style={styles.item}>• {m.name}</Text>)
           ) : (
             <Text style={styles.item}>No members yet</Text>
           )}
 
-          <Text style={[styles.subTitle, { marginTop: 12 }]}>Mutual Connections</Text>
-          {group.mutual_friends?.length ? (
-            group.mutual_friends.map((mf) => (
-              <Text key={mf.uid} style={styles.item}>
-                • {mf.name} (degree {mf.degree})
-              </Text>
-            ))
-          ) : (
-            <Text style={styles.item}>No mutual connections</Text>
+          {canJoin && (
+            <TouchableOpacity style={[styles.joinBtn, joining && { opacity: 0.7 }]} onPress={joinGroupHandler} disabled={joining}>
+              {joining ? <ActivityIndicator color="#fff" /> : (<><Ionicons name="person-add" color="#fff" size={18} /><Text style={styles.joinText}>Join Group</Text></>)}
+            </TouchableOpacity>
           )}
-
-          <TouchableOpacity
-            style={[styles.joinBtn, joining && { opacity: 0.7 }]}
-            onPress={joinGroupHandler}
-            disabled={joining}
-          >
-            {joining ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <>
-                <Ionicons name="person-add" color="#fff" size={18} />
-                <Text style={styles.joinText}>Join Group</Text>
-              </>
-            )}
-          </TouchableOpacity>
         </View>
       </ScrollView>
     </LinearGradient>
@@ -143,26 +113,11 @@ export default function GroupDetailScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  card: {
-    backgroundColor: "rgba(255,255,255,0.9)",
-    padding: 20,
-    borderRadius: 16,
-    shadowColor: "#000",
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
-  },
+  card: { backgroundColor: "rgba(255,255,255,0.9)", padding: 20, borderRadius: 16, shadowColor: "#000", shadowOpacity: 0.2, shadowRadius: 6 },
   title: { fontSize: 16, fontWeight: "700", marginBottom: 8, color: "#333" },
   subTitle: { fontSize: 14, fontWeight: "700", color: "#333", marginBottom: 8 },
   route: { fontSize: 16, fontWeight: "600", marginBottom: 10, color: "#222" },
   item: { fontSize: 14, color: "#444", marginBottom: 6 },
-  joinBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#E53935",
-    borderRadius: 12,
-    paddingVertical: 12,
-    marginTop: 16,
-  },
+  joinBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: "#E53935", borderRadius: 12, paddingVertical: 12, marginTop: 16 },
   joinText: { color: "#fff", fontWeight: "700", marginLeft: 8 },
 });

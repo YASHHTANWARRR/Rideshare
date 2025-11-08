@@ -1,4 +1,4 @@
-// CreateTripScreen.js (modal picker version) — logout removed from header
+// CreateTripScreen.js (ESM) — client-side sanitize + payload aligned with updated server
 import React, { useState, useEffect, useRef } from "react";
 import {
   View,
@@ -23,7 +23,7 @@ async function safeFetch(url, opts = {}) {
     let data = null;
     try {
       data = await resp.json();
-    } catch (e) {
+    } catch {
       data = { ok: resp.ok, error: "Invalid JSON from server" };
     }
     return { resp, data };
@@ -32,8 +32,16 @@ async function safeFetch(url, opts = {}) {
   }
 }
 
+// local normalizer (frontend hygiene only; server still validates against CSV)
+function normCity(s) {
+  return String(s || "")
+    .replace(/[^a-zA-Z.\-\s]/g, "") // keep letters, dots, hyphens, spaces
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export default function CreateTripScreen({ route, navigation }) {
-  const routeUser = route.params?.user || null;
+  const routeUser = route?.params?.user || null;
   const [user, setUser] = useState(routeUser);
 
   const [start, setStart] = useState("");
@@ -48,21 +56,18 @@ export default function CreateTripScreen({ route, navigation }) {
   const isMounted = useRef(true);
   useEffect(() => {
     isMounted.current = true;
-    return () => {
-      isMounted.current = false;
-    };
+    return () => { isMounted.current = false; };
   }, []);
 
   useEffect(() => {
-    async function loadUser() {
+    (async () => {
       if (!user) {
         try {
           const raw = await AsyncStorage.getItem("user");
           if (raw && isMounted.current) setUser(JSON.parse(raw));
-        } catch (e) {}
+        } catch {}
       }
-    }
-    loadUser();
+    })();
   }, []);
 
   function handleBack() {
@@ -71,20 +76,16 @@ export default function CreateTripScreen({ route, navigation }) {
 
   async function openDatePicker() {
     if (Platform.OS === "web") {
-      const defaultVal = `${date.getFullYear()}-${(date.getMonth() + 1)
-        .toString()
-        .padStart(2, "0")}-${date
+      const defaultVal = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, "0")}-${date
         .getDate()
         .toString()
-        .padStart(2, "0")} ${date
-        .getHours()
+        .padStart(2, "0")} ${date.getHours().toString().padStart(2, "0")}:${date
+        .getMinutes()
         .toString()
-        .padStart(2, "0")}:${date.getMinutes().toString().padStart(2, "0")}`;
+        .padStart(2, "0")}`;
       const input = window.prompt("Enter date & time (YYYY-MM-DD HH:MM)", defaultVal);
       if (!input) return;
-      let parsed;
-      if (input.includes(" ")) parsed = new Date(input.replace(" ", "T") + ":00");
-      else parsed = new Date(input);
+      const parsed = input.includes(" ") ? new Date(input.replace(" ", "T") + ":00") : new Date(input);
       if (!isNaN(parsed.getTime())) setDate(parsed);
       else Alert.alert("Invalid date", "Use YYYY-MM-DD HH:MM");
       return;
@@ -96,19 +97,13 @@ export default function CreateTripScreen({ route, navigation }) {
     try {
       if (!isMounted.current) return;
       setShowPicker(false);
-      if (selectedDate instanceof Date && !isNaN(selectedDate.getTime())) {
-        setDate(selectedDate);
-      }
-    } catch (e) {
-      console.warn("picker confirm error:", e);
+      if (selectedDate instanceof Date && !isNaN(selectedDate.getTime())) setDate(selectedDate);
+    } catch {
       try { setShowPicker(false); } catch {}
     }
   }
-
   function onPickerCancel() {
-    try {
-      if (isMounted.current) setShowPicker(false);
-    } catch (e) {}
+    try { if (isMounted.current) setShowPicker(false); } catch {}
   }
 
   async function onCreate() {
@@ -118,12 +113,29 @@ export default function CreateTripScreen({ route, navigation }) {
 
     setLoading(true);
     try {
+      // --- Client-side stops cleanup (sanitize + de-dup + remove start/dest) ---
       let stopsPayload = null;
       if (stopsText && stopsText.trim()) {
-        const arr = stopsText.split(",").map((s) => s.trim()).filter(Boolean);
-        if (arr.length) stopsPayload = arr;
+        const sLower = normCity(start).toLowerCase();
+        const dLower = normCity(dest).toLowerCase();
+        const seen = new Set();
+
+        const arr = stopsText
+          .split(",")
+          .map(normCity)
+          .filter(Boolean)
+          .filter((x) => {
+            const v = x.toLowerCase();
+            if (v === sLower || v === dLower) return false; // exclude start/dest from stops
+            if (seen.has(v)) return false; // de-dup
+            seen.add(v);
+            return true;
+          });
+
+        if (arr.length) stopsPayload = arr; // send array; server will final-validate against city CSV
       }
 
+      // --- Build payload matching server.js contract ---
       const payload = {
         start: start.trim(),
         dest: dest.trim(),
@@ -133,82 +145,80 @@ export default function CreateTripScreen({ route, navigation }) {
         stops: stopsPayload,
       };
 
+      // --- Auth header ---
       const token = await AsyncStorage.getItem("accessToken");
-      const headers = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      if (!token) {
+        setLoading(false);
+        Alert.alert("Login required", "Please login first.");
+        navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+        return;
+      }
 
+      const headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      };
+
+      // --- POST /create-trip ---
       const { resp, data } = await safeFetch(`${BACKEND_BASE.replace(/\/+$/, "")}/create-trip`, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
       });
 
-      setLoading(false);
-
       if (!resp || !resp.ok || !data?.ok) {
-        if (data && data.error && data.error.toLowerCase().includes("token")) {
+        setLoading(false);
+        if (data?.error && String(data.error).toLowerCase().includes("auth")) {
           Alert.alert("Session expired", "Please login again.");
-          await AsyncStorage.removeItem("user");
-          await AsyncStorage.removeItem("accessToken");
-          await AsyncStorage.removeItem("refreshToken");
+          await AsyncStorage.multiRemove(["user", "accessToken", "refreshToken"]);
           navigation.reset({ index: 0, routes: [{ name: "Login" }] });
           return;
         }
-        throw new Error(data?.error || "Create group failed");
+        return Alert.alert("Create failed", data?.error || `HTTP ${resp?.status || "?"}`);
       }
 
+      // Success
+      setLoading(false);
       Alert.alert("Success", "Group created successfully!");
-      navigation.navigate("Main", {
-        screen: "Groups",
-        params: { user: JSON.parse((await AsyncStorage.getItem("user")) || null) },
-      });
+      // Navigate to Groups tab (it will re-query there)
+      navigation.navigate("Main", { screen: "Groups", params: { user } });
     } catch (err) {
       setLoading(false);
       console.error("create-trip error:", err);
-      Alert.alert("Error", err.message || "Could not create group");
+      Alert.alert("Network error", "Could not reach server");
     }
   }
 
   return (
     <View style={{ flex: 1 }}>
       <MapBackdrop blur={true} />
-      <View style={styles.container}>
+      <View style={styles.sheet}>
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
           <TouchableOpacity onPress={handleBack} style={{ padding: 6 }}>
             <Ionicons name="arrow-back" size={22} color="#333" />
           </TouchableOpacity>
-          <Text style={styles.title}>Create New Ride</Text>
+          <Text style={styles.header}>Create a Ride</Text>
           <View style={{ width: 36 }} />
         </View>
 
         <View style={styles.inputRow}>
           <Ionicons name="pin" color="#E53935" size={18} />
-          <TextInput placeholder="From" style={styles.input} value={start} onChangeText={setStart} />
+          <TextInput placeholder="From (city)" style={styles.input} value={start} onChangeText={setStart} />
         </View>
 
         <View style={styles.inputRow}>
           <Ionicons name="flag" color="#E53935" size={18} />
-          <TextInput placeholder="To" style={styles.input} value={dest} onChangeText={setDest} />
+          <TextInput placeholder="To (city)" style={styles.input} value={dest} onChangeText={setDest} />
         </View>
 
         <View style={styles.inputRow}>
           <Ionicons name="people" color="#E53935" size={18} />
           <TextInput
-            placeholder="Group size (seats)"
+            placeholder="Total capacity (e.g., 4)"
             style={styles.input}
             keyboardType="number-pad"
             value={groupSize}
             onChangeText={setGroupSize}
-          />
-        </View>
-
-        <View style={styles.inputRow}>
-          <Ionicons name="ellipsis-horizontal" color="#E53935" size={18} />
-          <TextInput
-            placeholder="Intermediate stops (comma separated) e.g. Ludhiana,Jalandhar"
-            style={styles.input}
-            value={stopsText}
-            onChangeText={setStopsText}
           />
         </View>
 
@@ -219,6 +229,7 @@ export default function CreateTripScreen({ route, navigation }) {
           >
             <Text style={preference === "ALL" ? styles.prefTextActive : styles.prefText}>All</Text>
           </TouchableOpacity>
+
           <TouchableOpacity
             style={[styles.prefBtn, preference === "FEMALE_ONLY" && styles.prefBtnActive]}
             onPress={() => setPreference("FEMALE_ONLY")}
@@ -242,13 +253,24 @@ export default function CreateTripScreen({ route, navigation }) {
           onCancel={onPickerCancel}
         />
 
+        <View style={[styles.inputRow, { alignItems: "flex-start" }]}>
+          <Ionicons name="git-branch" color="#E53935" size={18} style={{ marginTop: 12 }} />
+          <TextInput
+            placeholder="Intermediate stops (comma-separated, e.g., Ambala, Ludhiana)"
+            style={[styles.input, { minHeight: 44 }]}
+            value={stopsText}
+            onChangeText={setStopsText}
+            multiline
+          />
+        </View>
+
         <TouchableOpacity style={[styles.createBtn, loading && { opacity: 0.7 }]} onPress={onCreate} disabled={loading}>
           {loading ? (
             <ActivityIndicator color="#fff" />
           ) : (
             <>
-              <Ionicons name="add-circle" color="#fff" size={20} />
-              <Text style={styles.createText}>Create Group</Text>
+              <Ionicons name="checkmark-circle" color="#fff" size={20} />
+              <Text style={styles.createText}>Create</Text>
             </>
           )}
         </TouchableOpacity>
@@ -258,15 +280,8 @@ export default function CreateTripScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
-  title: {
-    fontSize: 22,
-    fontWeight: "700",
-    marginBottom: 16,
-    color: "#222",
-    textAlign: "center",
-    flex: 1,
-  },
+  sheet: { flex: 1, padding: 16 },
+  header: { fontSize: 20, fontWeight: "700", marginBottom: 12, color: "#222", textAlign: "center", flex: 1 },
   inputRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -279,13 +294,7 @@ const styles = StyleSheet.create({
   },
   input: { flex: 1, padding: 10 },
   prefRow: { flexDirection: "row", marginTop: 4, marginBottom: 10 },
-  prefBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 18,
-    backgroundColor: "rgba(0,0,0,0.06)",
-    marginRight: 10,
-  },
+  prefBtn: { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 18, backgroundColor: "rgba(0,0,0,0.06)", marginRight: 10 },
   prefBtnActive: { backgroundColor: "#E53935" },
   prefText: { color: "#333", fontWeight: "600" },
   prefTextActive: { color: "#fff", fontWeight: "700" },
@@ -303,7 +312,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#E53935",
+    backgroundColor: "#43A047",
     borderRadius: 12,
     paddingVertical: 12,
     marginTop: 6,
