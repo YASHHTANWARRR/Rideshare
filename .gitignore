@@ -1,12 +1,42 @@
-# === Backend ===
-__pycache__/
-node_modules/
+# ===========================
+# Backend
+# ===========================
+backend/__pycache__/
+backend/node_modules/
 
-# === Mobile ===
+# Ignore heavy GeoNames data (generated/downloaded)
+backend/data/
+backend/cities/
+
+# Python bytecode
+*.pyc
+
+# Backend environment files
+backend/.env
+.env
+
+# ===========================
+# Mobile App
+# ===========================
+mobile/.expo/
+mobile/.vscode/
+mobile/node_modules/
+
+# Expo local settings
 .expo/
+.expo-shared/
+
+# ===========================
+# OS / Editor junk
+# ===========================
+.DS_Store
+Thumbs.db
 .vscode/
-node_modules/
 
-
-".env" 
-"backend/.env" 
+# ===========================
+# Logs
+# ===========================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
