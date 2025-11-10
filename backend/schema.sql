@@ -1,6 +1,3 @@
--- schema.sql
--- Tables for rideshare app
-
 CREATE TABLE IF NOT EXISTS users (
   uid SERIAL PRIMARY KEY,
   roll_no VARCHAR(64) UNIQUE NOT NULL,
@@ -36,12 +33,18 @@ CREATE TABLE IF NOT EXISTS group_members (
 
 CREATE TABLE IF NOT EXISTS connections (
   id SERIAL PRIMARY KEY,
-  u1 INT REFERENCES users(uid),
-  u2 INT REFERENCES users(uid),
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+  u1 INT REFERENCES users(uid) NOT NULL,
+  u2 INT REFERENCES users(uid) NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  CONSTRAINT connections_no_self CHECK (u1 <> u2)
 );
 
--- refresh_tokens: server also creates it, but keeping here is fine (IF NOT EXISTS)
+CREATE UNIQUE INDEX IF NOT EXISTS connections_undirected_unique
+  ON connections (LEAST(u1, u2), GREATEST(u1, u2));
+
+CREATE INDEX IF NOT EXISTS connections_u1_idx ON connections(u1);
+CREATE INDEX IF NOT EXISTS connections_u2_idx ON connections(u2);
+
 CREATE TABLE IF NOT EXISTS refresh_tokens (
   token TEXT PRIMARY KEY,
   uid INT NOT NULL,
@@ -49,17 +52,19 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
   expires_at TIMESTAMP WITH TIME ZONE
 );
 
--- helper function: user_connection_degree
--- NOTE: mark STABLE (not IMMUTABLE) because it reads tables.
 CREATE OR REPLACE FUNCTION user_connection_degree(a INT, b INT) RETURNS INT AS $$
-  WITH RECURSIVE conn(path, last) AS (
-    SELECT ARRAY[a], a
-    UNION
-    SELECT path || u2, u2
-    FROM conn
-    JOIN connections c ON c.u1 = conn.last
-    JOIN users u2 ON u2.uid = c.u2
-    WHERE NOT u2.uid = ANY(path)
+  WITH RECURSIVE bfs(node, depth, path) AS (
+    SELECT a::int, 0, ARRAY[a::int]
+    UNION ALL
+    SELECT
+      CASE WHEN c.u1 = bfs.node THEN c.u2 ELSE c.u1 END,
+      bfs.depth + 1,
+      bfs.path || CASE WHEN c.u1 = bfs.node THEN c.u2 ELSE c.u1 END
+    FROM bfs
+    JOIN connections c
+      ON c.u1 = bfs.node OR c.u2 = bfs.node
+    WHERE NOT (CASE WHEN c.u1 = bfs.node THEN c.u2 ELSE c.u1 END = ANY(bfs.path))
   )
-  SELECT array_length(path,1)-1 FROM conn WHERE last = b LIMIT 1;
+  SELECT MIN(depth) FROM bfs WHERE node = b;
 $$ LANGUAGE SQL STABLE;
+
