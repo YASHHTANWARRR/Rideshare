@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { Platform } from "react-native";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
@@ -12,18 +11,14 @@ import CreateTripScreen from "./screens/CreateTripScreen";
 import GroupsScreen from "./screens/GroupsScreen";
 import GroupDetailsScreen from "./screens/GroupDetailsScreen";
 
-// ✅✅ MAIN FIX FOR WEB TESTING
-// Backend running on localhost:3000 → we force the frontend to always use it.
-const MANUAL_BACKEND_BASE = "http://localhost:3000";
-
-// In case someone removes MANUAL_BASE later, fallback still stays on 3000
-function devFallbackBase() {
-  return "http://localhost:3000";
-}
-
-// Final backend URL selection
+// ✅ FINAL CLEAN BACKEND URL LOGIC
+// 1) Vercel/Expo deploy → uses EXPO_PUBLIC_BACKEND_BASE
+// 2) Local/Dev → uses Render backend URL
 export const BACKEND_BASE =
-  MANUAL_BACKEND_BASE || devFallbackBase();
+  (
+    process.env.EXPO_PUBLIC_BACKEND_BASE ||
+    "https://ucs503p-202526odd-teamkhabu.onrender.com"
+  ).replace(/\/+$/, "");
 
 if (__DEV__) {
   console.log("✅ BACKEND_BASE =", BACKEND_BASE);
@@ -94,10 +89,11 @@ export default function App() {
   return (
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        {/* First screen = Login */}
+        
+        {/* Login First */}
         <Stack.Screen name="Login" component={LoginScreen} />
 
-        {/* After login → Tabs */}
+        {/* Tabs after login */}
         <Stack.Screen name="Main" component={MainTabs} />
 
         {/* Group Details */}
