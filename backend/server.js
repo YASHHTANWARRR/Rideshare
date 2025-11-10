@@ -28,10 +28,13 @@ const ACCESS_TOKEN_EXPIRES = process.env.ACCESS_TOKEN_EXPIRES || "15m";
 const REFRESH_TOKEN_EXPIRES = process.env.REFRESH_TOKEN_EXPIRES || "30d";
 const DEV_ALLOW_UNKNOWN_CITIES = process.env.DEV_ALLOW_UNKNOWN_CITIES === "true";
 
-// -------------------- Database --------------------
+// -------------------- Database (TLS forced) --------------------
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
+  // Always ensure sslmode=require on Render/managed PG
+  connectionString: (process.env.DATABASE_URL || "").includes("sslmode=")
+    ? process.env.DATABASE_URL
+    : `${process.env.DATABASE_URL}?sslmode=require`,
+  ssl: { require: true, rejectUnauthorized: false },
 });
 
 // Ensure refresh_tokens exists (idempotent)
