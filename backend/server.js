@@ -22,10 +22,11 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 // -------------------- Config --------------------
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-please-change";
 const ACCESS_TOKEN_EXPIRES = process.env.ACCESS_TOKEN_EXPIRES || "15m";
 const REFRESH_TOKEN_EXPIRES = process.env.REFRESH_TOKEN_EXPIRES || "30d";
+const DEV_ALLOW_UNKNOWN_CITIES = process.env.DEV_ALLOW_UNKNOWN_CITIES === "true";
 
 // -------------------- Database --------------------
 const pool = new Pool({
@@ -70,6 +71,10 @@ function normalizeCityName(s) {
 }
 function createAccessToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRES });
+}
+// NEW: check if a city string is exactly "Patiala" (case-insensitive)
+function isPatialaCity(s) {
+  return typeof s === "string" && s.trim().toLowerCase() === "patiala";
 }
 
 // -------------------- Auth helpers --------------------
@@ -124,14 +129,16 @@ let CITY_SET = new Set();
 function isValidCity(c) {
   if (!c) return false;
   if (CITY_SET.size === 0) return true; // fallback if CSV missing
-  return CITY_SET.has(c.toLowerCase());
+  return CITY_SET.has(c.toLowerCase()) || DEV_ALLOW_UNKNOWN_CITIES;
 }
 
-// -------------------- Group Formatting --------------------
+// -------------------- Group Formatting (ROUTE + YEAR + MUTUALS) --------------------
 async function formatGroupByRow(row, viewer_uid = null) {
   const gid = row.gid;
+
+  // include year for each member
   const m = await pool.query(
-    `SELECT gm.uid, u.name, u.gender
+    `SELECT gm.uid, u.name, u.gender, u.year
      FROM group_members gm
      LEFT JOIN users u ON u.uid = gm.uid
      WHERE gm.gid = $1
@@ -142,24 +149,76 @@ async function formatGroupByRow(row, viewer_uid = null) {
   const cnt = members.length;
   const seats_left = Math.max(0, (row.capacity || 0) - cnt);
 
+  // Build route array directly from DB row (stops = "A|B|C")
+  const route = [row.start, ...(row.stops ? row.stops.split("|") : []), row.dest].filter(Boolean);
+
+  // Compute mutuals (LinkedIn-style) = shortest degree via unbounded BFS over undirected edges
+  let mutual_friends = [];
+  if (viewer_uid && members.length) {
+    const targetUids = members
+      .map(mm => Number(mm.uid))
+      .filter(u => u !== Number(viewer_uid));
+
+    if (targetUids.length) {
+      const q = `
+        WITH RECURSIVE bfs(uid, depth, path) AS (
+          -- start from viewer
+          SELECT $1::int AS uid, 0 AS depth, ARRAY[$1::int] AS path
+          UNION ALL
+          -- expand to neighbors (undirected)
+          SELECT
+            CASE WHEN c.u1 = b.uid THEN c.u2 ELSE c.u1 END AS uid,
+            b.depth + 1,
+            b.path || CASE WHEN c.u1 = b.uid THEN c.u2 ELSE c.u1 END
+          FROM bfs b
+          JOIN connections c
+            ON c.u1 = b.uid OR c.u2 = b.uid
+          WHERE NOT (CASE WHEN c.u1 = b.uid THEN c.u2 ELSE c.u1 END = ANY(b.path))
+        )
+        SELECT u.uid, u.name, MIN(b.depth) AS degree
+        FROM bfs b
+        JOIN users u ON u.uid = b.uid
+        WHERE b.depth > 0
+          AND b.uid = ANY($2::int[])
+        GROUP BY u.uid, u.name
+        ORDER BY degree ASC, u.name ASC;
+      `;
+      const res = await pool.query(q, [viewer_uid, targetUids]);
+
+      // add LinkedIn-style labels
+      mutual_friends = (res.rows || []).map(r => ({
+        uid: r.uid,
+        name: r.name,
+        degree: Number(r.degree),
+        degree_label: (Number(r.degree) === 1) ? "1st" :
+                      (Number(r.degree) === 2) ? "2nd" : "3rd+"
+      }));
+    }
+  }
+
+  const mutual_count = mutual_friends.length;
+
   return {
     gid: row.gid,
     start: row.start,
     dest: row.dest,
     stops: row.stops ? row.stops.split("|") : [],
+    route,                        // ← array for UI
     departure_date: row.departure_date,
     capacity: row.capacity,
     preference: row.preference,
     created_by: row.created_by,
-    members,
+    members,                      // includes year
     seats_left,
+    mutual_friends,               // degrees for viewer→members (with labels)
+    mutual_count,                 // for "X mutual connections" badge
     is_member:
       viewer_uid != null &&
       members.some((mm) => Number(mm.uid) === Number(viewer_uid)),
   };
 }
 
-// Helper SQL to compute positions of start/dest in route
+// Helper SQL to compute positions of start/dest in route (for search ordering)
 const posSql = `
 SELECT 
   array_position( 
@@ -349,22 +408,89 @@ app.post("/logout", requireAuth, async (req, res) => {
   }
 });
 
+// -------------------- CONNECTION (single route) --------------------
+app.post("/connections", requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const other = parseInt(req.body?.other_uid, 10);
+    if (!other || other === uid) return respondError(res, 400, "invalid other_uid");
+    const q = `
+      INSERT INTO connections (u1, u2)
+      VALUES ($1,$2)
+      ON CONFLICT DO NOTHING
+      RETURNING id, u1, u2, created_at
+    `;
+    const r = await pool.query(q, [uid, other]);
+    const existed = r.rowCount === 0;
+    return ok(res, {
+      created: !existed,
+      message: existed ? "connection already exists" : "connection created",
+      connection: r.rows?.[0] || null
+    });
+  } catch (e) {
+    console.error("POST /connections error:", e);
+    return respondError(res, 500, "server error");
+  }
+});
+
+// NEW: list my connections (for UI to hide/show Connect CTA)
+app.get("/connections/me", requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const q = `
+      SELECT u.uid, u.name, u.gender, u.year
+      FROM connections c
+      JOIN users u ON u.uid = (CASE WHEN c.u1=$1 THEN c.u2 ELSE c.u1 END)
+      WHERE c.u1=$1 OR c.u2=$1
+      ORDER BY u.name ASC
+    `;
+    const r = await pool.query(q, [uid]);
+    return ok(res, { connections: r.rows || [] });
+  } catch (e) {
+    console.error("GET /connections/me error:", e);
+    return respondError(res, 500, "server error");
+  }
+});
+
+// NEW: very basic friends-of-friends suggestions
+app.get("/connections/suggested", requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const q = `
+      WITH neighbors AS (
+        SELECT CASE WHEN c.u1=$1 THEN c.u2 ELSE c.u1 END AS uid
+        FROM connections c WHERE c.u1=$1 OR c.u2=$1
+      ),
+      fof AS (
+        SELECT DISTINCT CASE WHEN c.u1=n.uid THEN c.u2 ELSE c.u1 END AS uid
+        FROM connections c JOIN neighbors n ON c.u1=n.uid OR c.u2=n.uid
+      )
+      SELECT u.uid, u.name, u.year
+      FROM fof JOIN users u ON u.uid=fof.uid
+      WHERE u.uid<>$1
+        AND u.uid NOT IN (SELECT uid FROM neighbors)
+      LIMIT 20
+    `;
+    const r = await pool.query(q, [uid]);
+    return ok(res, { suggested: r.rows || [] });
+  } catch (e) {
+    console.error("GET /connections/suggested error:", e);
+    return respondError(res, 500, "server error");
+  }
+});
+
 // --------- TRIPS / GROUPS ---------
 
-// Create Trip (strict city sanitize/validate)
+// Create Trip (start OR destination must be "Patiala")
 app.post("/create-trip", requireAuth, async (req, res) => {
   const creator_uid = req.user && req.user.uid;
   try {
     const raw = req.body || {};
 
     const startNorm = normalizeCityName(raw.start);
-    const destNorm = normalizeCityName(raw.dest);
+    const destNorm  = normalizeCityName(raw.dest);
     if (!creator_uid || !startNorm || !destNorm)
-      return respondError(
-        res,
-        400,
-        "authenticated user, start and dest required"
-      );
+      return respondError(res, 400, "authenticated user, start and dest required");
     if (!isValidCity(startNorm))
       return respondError(res, 400, "Invalid start city");
     if (!isValidCity(destNorm))
@@ -372,8 +498,7 @@ app.post("/create-trip", requireAuth, async (req, res) => {
 
     // stops sanitize + validate + de-dup + exclude start/dest
     let stopsStr = null;
-    const sLower = startNorm.toLowerCase(),
-      dLower = destNorm.toLowerCase();
+    const sLower = startNorm.toLowerCase(), dLower = destNorm.toLowerCase();
     const seen = new Set();
     const rawStops = Array.isArray(raw.stops)
       ? raw.stops
@@ -392,16 +517,30 @@ app.post("/create-trip", requireAuth, async (req, res) => {
       });
     if (cleanedStops.length) stopsStr = cleanedStops.join("|");
 
-    const capacity = safeInt(raw.capacity, 4);
-    const preference = raw.preference
-      ? String(raw.preference).toUpperCase()
-      : "ALL";
-    const departure = raw.departure || null;
-    const auto_join_creator =
-      raw.auto_join_creator === false ? false : true;
+    // 🔴 RULE: start OR destination must be Patiala (stops don't count)
+    const startIsPatiala = isPatialaCity(startNorm);
+    const destIsPatiala  = isPatialaCity(destNorm);
+    if (!(startIsPatiala || destIsPatiala)) {
+      return respondError(res, 400, "either start or destination must be Patiala");
+    }
+
+    const capacity   = safeInt(raw.capacity, 4);
+    const preference = raw.preference ? String(raw.preference).toUpperCase() : "ALL";
+    const departure  = raw.departure || null;
+    const auto_join_creator = raw.auto_join_creator === false ? false : true;
 
     if (!validatePreference(preference))
       return respondError(res, 400, "invalid preference");
+
+    // FEMALE_ONLY guard: only female users may create such groups
+    if (preference === "FEMALE_ONLY") {
+      const ug = await pool.query(`SELECT gender FROM users WHERE uid=$1`, [creator_uid]);
+      const g  = (ug.rows?.[0]?.gender || "").toUpperCase();
+      if (g !== "F") {
+        return respondError(res, 403, "only female users can create FEMALE_ONLY groups");
+      }
+    }
+
     if (capacity <= 0 || capacity > 200)
       return respondError(res, 400, "capacity must be between 1 and 200");
 
@@ -412,13 +551,7 @@ app.post("/create-trip", requireAuth, async (req, res) => {
         INSERT INTO groups (start, dest, stops, departure_date, capacity, preference, created_by)
         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`;
       const r = await client.query(insertQ, [
-        startNorm,
-        destNorm,
-        stopsStr,
-        departure,
-        capacity,
-        preference,
-        creator_uid,
+        startNorm, destNorm, stopsStr, departure, capacity, preference, creator_uid,
       ]);
       const g = r.rows[0];
 
@@ -441,6 +574,23 @@ app.post("/create-trip", requireAuth, async (req, res) => {
     }
   } catch (err) {
     console.error("create-trip outer error:", err);
+    return respondError(res, 500, "internal server error");
+  }
+});
+
+// Group Details (with LinkedIn-style mutuals)
+app.get("/groups/:gid", requireAuth, async (req, res) => {
+  try {
+    const gid = safeInt(req.params.gid, null);
+    if (!gid) return respondError(res, 400, "invalid gid");
+
+    const r = await pool.query(`SELECT * FROM groups WHERE gid = $1 LIMIT 1`, [gid]);
+    if (r.rowCount === 0) return respondError(res, 404, "group not found");
+
+    const group = await formatGroupByRow(r.rows[0], req.user.uid);
+    return ok(res, { group });
+  } catch (e) {
+    console.error("/groups/:gid error:", e);
     return respondError(res, 500, "internal server error");
   }
 });
@@ -610,74 +760,178 @@ app.post("/join-group", requireAuth, async (req, res) => {
       `SELECT COUNT(*)::int AS cnt FROM group_members WHERE gid = $1`,
       [gidInt]
     );
-    const current = parseInt(membersRes.rows[0].cnt || 0, 10);
-    const capacity = gq.rows[0].capacity;
-    if (current >= capacity) {
+    const cnt = membersRes.rows[0]?.cnt || 0;
+    if (cnt >= gq.rows[0].capacity) {
       await client.query("ROLLBACK");
-      return respondError(res, 400, "group is full");
+      return respondError(res, 400, "group full");
+    }
+
+    // already a member?
+    const already = await client.query(
+      `SELECT 1 FROM group_members WHERE gid=$1 AND uid=$2 LIMIT 1`,
+      [gidInt, uid]
+    );
+    if (already.rowCount > 0) {
+      await client.query("ROLLBACK");
+      return respondError(res, 400, "already a member");
     }
 
     await client.query(
-      `INSERT INTO group_members (gid, uid) 
-       VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+      `INSERT INTO group_members (gid, uid) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
       [gidInt, uid]
     );
 
     await client.query("COMMIT");
-    return ok(res, { joined: true, gid: gidInt });
-  } catch (e) {
+
+    const g2 = await pool.query(`SELECT * FROM groups WHERE gid=$1`, [gidInt]);
+    const formatted = await formatGroupByRow(g2.rows[0], uid);
+    return ok(res, { group: formatted });
+  } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
-    console.error("/join-group error:", e);
-    return respondError(res, 500, "internal server error");
+    console.error("join-group error:", err);
+    return respondError(res, 500, "server error");
   } finally {
     client.release();
   }
 });
 
-// My Rides (Created + Joined; Upcoming/Past)
+// NEW: Leave Group (member can leave; creator cannot)
+app.post("/leave-group", requireAuth, async (req, res) => {
+  const uid = req.user.uid;
+  const gid = safeInt(req.body?.gid, null);
+  if (!gid) return respondError(res, 400, "invalid gid");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // verify group + creator
+    const gq = await client.query(
+      `SELECT gid, created_by FROM groups WHERE gid=$1 FOR UPDATE`,
+      [gid]
+    );
+    if (gq.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return respondError(res, 404, "group not found");
+    }
+    if (Number(gq.rows[0].created_by) === Number(uid)) {
+      await client.query("ROLLBACK");
+      return respondError(res, 400, "creator must delete group");
+    }
+
+    // if not a member, idempotent success
+    const isMem = await client.query(
+      `SELECT 1 FROM group_members WHERE gid=$1 AND uid=$2 LIMIT 1`,
+      [gid, uid]
+    );
+    if (isMem.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return ok(res, { left: true });
+    }
+
+    await client.query(`DELETE FROM group_members WHERE gid=$1 AND uid=$2`, [
+      gid,
+      uid,
+    ]);
+
+    await client.query("COMMIT");
+
+    // latest formatted group (optional for UI)
+    const g2 = await pool.query(`SELECT * FROM groups WHERE gid=$1`, [gid]);
+    if (g2.rowCount) {
+      const formatted = await formatGroupByRow(g2.rows[0], uid);
+      return ok(res, { left: true, group: formatted });
+    }
+    return ok(res, { left: true });
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("leave-group error:", e);
+    return respondError(res, 500, "server error");
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE GROUP (creator-only)
+app.delete("/groups/:gid", requireAuth, async (req, res) => {
+  const uid = req.user.uid;
+  const gid = safeInt(req.params.gid, null);
+  if (!gid) return respondError(res, 400, "invalid gid");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const gq = await client.query(
+      `SELECT gid, created_by FROM groups WHERE gid=$1 FOR UPDATE`,
+      [gid]
+    );
+    if (gq.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return respondError(res, 404, "group not found");
+    }
+    if (Number(gq.rows[0].created_by) !== Number(uid)) {
+      await client.query("ROLLBACK");
+      return respondError(res, 403, "only creator can delete");
+    }
+
+    await client.query(`DELETE FROM group_members WHERE gid=$1`, [gid]);
+    await client.query(`DELETE FROM groups WHERE gid=$1`, [gid]);
+
+    await client.query("COMMIT");
+    return ok(res, { deleted: true });
+  } catch (e) {
+    await client.query("ROLLBACK").catch(()=>{});
+    console.error("DELETE /groups/:gid error:", e);
+    return respondError(res, 500, "server error");
+  } finally {
+    client.release();
+  }
+});
+
+// My rides (created/joined; upcoming/past)
 app.get("/my-rides", requireAuth, async (req, res) => {
   try {
     const uid = req.user.uid;
-    const now = new Date();
 
-    const created = await pool.query(
-      `SELECT * FROM groups WHERE created_by = $1
-       ORDER BY departure_date NULLS LAST, gid DESC`,
+    // created groups
+    const createdRes = await pool.query(
+      `SELECT * FROM groups WHERE created_by=$1 ORDER BY departure_date NULLS LAST, gid DESC`,
       [uid]
     );
-    const joined = await pool.query(
-      `SELECT g.* FROM groups g
-       JOIN group_members gm ON gm.gid = g.gid
-       WHERE gm.uid = $1
-       ORDER BY g.departure_date NULLS LAST, g.gid DESC`,
-      [uid]
+    const created = await Promise.all(
+      createdRes.rows.map((g) => formatGroupByRow(g, uid))
     );
 
-    const split = (rows) =>
-      rows.reduce(
-        (acc, g) => {
-          (g.departure_date && new Date(g.departure_date) >= now
-            ? acc.upcoming
-            : acc.past
-          ).push(g);
-          return acc;
-        },
-        { upcoming: [], past: [] }
+    // joined groups
+    const joinedGidsRes = await pool.query(
+      `SELECT gid FROM group_members WHERE uid=$1 ORDER BY gid DESC`,
+      [uid]
+    );
+    const joinedGids = joinedGidsRes.rows.map((r) => r.gid);
+    let joined = [];
+    if (joinedGids.length) {
+      const jRes = await pool.query(
+        `SELECT * FROM groups WHERE gid = ANY($1::int[]) ORDER BY departure_date NULLS LAST, gid DESC`,
+        [joinedGids]
       );
+      joined = await Promise.all(jRes.rows.map((g) => formatGroupByRow(g, uid)));
+    }
 
-    const cr = split(created.rows);
-    const jr = split(joined.rows);
-
-    const [cu, cp, ju, jp] = await Promise.all([
-      Promise.all(cr.upcoming.map((g) => formatGroupByRow(g, uid))),
-      Promise.all(cr.past.map((g) => formatGroupByRow(g, uid))),
-      Promise.all(jr.upcoming.map((g) => formatGroupByRow(g, uid))),
-      Promise.all(jr.past.map((g) => formatGroupByRow(g, uid))),
-    ]);
+    const now = Date.now();
+    function split(arr) {
+      const out = { upcoming: [], past: [] };
+      for (const g of arr) {
+        const t = g.departure_date ? new Date(g.departure_date).getTime() : null;
+        if (t && t >= now) out.upcoming.push(g);
+        else out.past.push(g);
+      }
+      return out;
+    }
 
     return ok(res, {
-      created: { upcoming: cu, past: cp },
-      joined: { upcoming: ju, past: jp },
+      created: split(created),
+      joined: split(joined),
     });
   } catch (e) {
     console.error("/my-rides error:", e);
@@ -685,7 +939,7 @@ app.get("/my-rides", requireAuth, async (req, res) => {
   }
 });
 
-// -------------------- Start Server --------------------
+// -------------------- Start --------------------
 app.listen(PORT, () => {
-  console.log("RideShare server running on port", PORT);
+  console.log(`✅ RideShare backend listening on http://localhost:${PORT}`);
 });
